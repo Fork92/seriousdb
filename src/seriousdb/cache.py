@@ -5,12 +5,14 @@ with :meth:`Cache.flush`. All access to the data is guarded by a lock, so a
 single :class:`Cache` can be shared between request handlers.
 """
 
+import asyncio
 import json
 import logging
 import os
 import time
 from threading import Lock
 
+from .config import DB_FILE, SYNC_INTERVAL
 from .exceptions import ResourceNotFoundError, ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -36,9 +38,10 @@ class Cache:
     """
 
     def __init__(self):
-        self.filename: str | None = None
+        self.filename: str | None = DB_FILE
         self.db: dict[str, str] | None = None
         self.lock = Lock()
+        self.changed = asyncio.Event()
 
     def insert(self, key: str, value: str) -> tuple[str, bool]:
         """Store `value` under `key`, replacing any existing value.
@@ -66,9 +69,10 @@ class Cache:
             If no database has been loaded.
         """
         with self.lock:
-            db = require_db(self)
-            is_new_key = key not in db
-            db[key] = value
+            self.db = require_db(self)
+            is_new_key = key not in self.db
+            self.db[key] = value
+            self.changed.set()
         return value, is_new_key
 
     def select(self, key: str) -> str:
@@ -122,12 +126,13 @@ class Cache:
         """
         with self.lock:
             val = require_db(self).pop(key, None)
+            self.changed.set()
         if val is None:
             logger.debug("Key not found: %s", key)
             raise ResourceNotFoundError(f"No value set for key {key}")
         return val
 
-    def load(self, filename: str) -> None:
+    def load(self) -> None:
         """Load the database from `filename`, replacing the current data.
 
         If the file does not exist, it is created with an empty database.
@@ -147,35 +152,34 @@ class Cache:
             If the file cannot be read, renamed or written.
         """
         with self.lock:
-            if not os.path.isfile(filename):
+            if not os.path.isfile(self.filename):
                 logger.info(
                     "Database file %s does not exist; creating a new database",
-                    filename,
+                    self.filename,
                 )
-                self.db = _write_default(filename)
+                self.db = _write_default(self.filename)
             else:
                 try:
-                    with open(filename, "rb") as f:
+                    with open(self.filename, "rb") as f:
                         self.db = json.loads(f.read().decode())
                         if not isinstance(self.db, dict):
                             raise TypeError(
                                 f"expected dict, got {type(self.db).__name__}"
                             )
-                        logger.info("Loaded database from %s", filename)
+                        logger.info("Loaded database from %s", self.filename)
 
                 except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as e:
-                    backup = f"{filename}.corrupt-{int(time.time())}"
-                    os.replace(filename, backup)
+                    backup = f"{self.filename}.corrupt-{int(time.time())}"
+                    os.replace(self.filename, backup)
                     logger.warning(
                         "Corrupt database file %s (%s); moved to %s and starting fresh",
-                        filename,
+                        self.filename,
                         e,
                         backup,
                     )
-                    self.db = _write_default(filename)
-            self.filename = filename
+                    self.db = _write_default(self.filename)
 
-    def flush(self) -> None:
+    async def flush(self) -> None:
         """Write the current data to the database file.
 
         The file is overwritten with the full database. Does nothing if no
@@ -187,11 +191,38 @@ class Cache:
             If the file cannot be written.
         """
         with self.lock:
+            logger.debug("Flush database")
             if self.db is None or self.filename is None:
                 logger.error("Cannot flush database: database is not loaded")
                 return
-            with open(self.filename, "wb+") as f:
-                f.write(json.dumps(self.db).encode())
+            await asyncio.to_thread(self._flush_sync)
+            
+
+    async def flush_worker(self) -> None:
+        """Background worker task.
+
+        Check if the in-memory database has any changes and sync after `SYNC_INTERVAL` timedout. 
+        Does nothing if no changes happened. 
+
+        """
+        while True:
+            await self.changed.wait()
+            self.changed.clear()
+
+            while True:
+                try:
+                    await asyncio.wait_for(self.changed.wait(), timeout=SYNC_INTERVAL)
+                    logger.debug("new change happen")
+                    self.changed.clear()
+                except TimeoutError:
+                    logger.debug("Flush...")
+                    break
+            
+            await self.flush()
+
+    def _flush_sync(self) -> None:
+        with open(self.filename, "wb+") as f:
+            f.write(json.dumps(self.db).encode())
 
 
 def _write_default(filename: str) -> dict[str, str]:

@@ -1,10 +1,10 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from inspect import cleandoc
 from typing import Annotated
 
 from fastapi import (
-    BackgroundTasks,
     Depends,
     FastAPI,
     HTTPException,
@@ -16,7 +16,6 @@ from fastapi import (
 from seriousdb.logging_config import configure_logging
 
 from .cache import Cache, require_db
-from .config import DB_FILE
 from .error_handlers import register_exception_handlers
 
 cache = Cache()
@@ -25,8 +24,21 @@ cache = Cache()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
-    cache.load(DB_FILE)
+    cache.load()
+
+    task = asyncio.create_task(cache.flush_worker())
+
     yield
+
+    task.cancel()
+
+    try: 
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    if cache.changed.is_set():
+        await cache.flush()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -65,13 +77,11 @@ def put(
         str, Query(min_length=1, description="The key to store the value under.")
     ],
     value: Annotated[str, Query(description="The value to store.")],
-    background_tasks: BackgroundTasks,
     cache: Annotated[Cache, Depends(get_cache)],
     response: Response,
 ) -> str:
     value, is_new_key = cache.insert(key, value)
     response.status_code = status.HTTP_201_CREATED if is_new_key else status.HTTP_200_OK
-    background_tasks.add_task(cache.flush)
     return value
 
 
@@ -202,11 +212,9 @@ def count(cache: Annotated[Cache, Depends(get_cache)]) -> int:
 )
 def delete(
     key: Annotated[str, Query(description="The key to remove.")],
-    background_tasks: BackgroundTasks,
     cache: Annotated[Cache, Depends(get_cache)],
 ) -> str:
     value = cache.delete(key)
-    background_tasks.add_task(cache.flush)
     return value
 
 

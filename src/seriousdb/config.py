@@ -26,6 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 DB_FILE = os.getenv("SERIOUSDB_DB_FILE", ".sdb")
+SYNC_INTERVAL = float(os.getenv("SERIOUSDB_DB_SYNC_INTERVAL", "5.0"))
 LOG_LEVEL = os.getenv("SERIOUSDB_LOG_LEVEL", "INFO")
 HOST = os.getenv("SERIOUSDB_HOST", "127.0.0.1")
 PORT = int(os.getenv("SERIOUSDB_PORT", "8000"))
