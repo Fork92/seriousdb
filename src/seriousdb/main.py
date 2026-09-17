@@ -16,6 +16,7 @@ from fastapi import (
 from seriousdb.logging_config import configure_logging
 
 from .cache import Cache, require_db
+from .config import DB_FILE
 from .error_handlers import register_exception_handlers
 
 cache = Cache()
@@ -24,7 +25,7 @@ cache = Cache()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     configure_logging()
-    cache.load()
+    cache.load(DB_FILE)
 
     task = asyncio.create_task(cache.flush_worker())
 

@@ -12,7 +12,7 @@ import os
 import time
 from threading import Lock
 
-from .config import DB_FILE, SYNC_INTERVAL
+from .config import SYNC_INTERVAL
 from .exceptions import ResourceNotFoundError, ServiceUnavailableError
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class Cache:
     """
 
     def __init__(self):
-        self.filename: str | None = DB_FILE
+        self.filename: str | None = None
         self.db: dict[str, str] | None = None
         self.lock = Lock()
         self.changed = asyncio.Event()
@@ -71,7 +71,7 @@ class Cache:
         with self.lock:
             self.db = require_db(self)
             is_new_key = key not in self.db
-            self.db[key] = value
+            db[key] = value
             self.changed.set()
         return value, is_new_key
 
@@ -132,7 +132,7 @@ class Cache:
             raise ResourceNotFoundError(f"No value set for key {key}")
         return val
 
-    def load(self) -> None:
+    def load(self, filename: str) -> None:
         """Load the database from `filename`, replacing the current data.
 
         If the file does not exist, it is created with an empty database.
@@ -155,29 +155,30 @@ class Cache:
             if not os.path.isfile(self.filename):
                 logger.info(
                     "Database file %s does not exist; creating a new database",
-                    self.filename,
+                    filename,
                 )
-                self.db = _write_default(self.filename)
+                self.db = _write_default(filename)
             else:
                 try:
-                    with open(self.filename, "rb") as f:
+                    with open(filename, "rb") as f:
                         self.db = json.loads(f.read().decode())
                         if not isinstance(self.db, dict):
                             raise TypeError(
                                 f"expected dict, got {type(self.db).__name__}"
                             )
-                        logger.info("Loaded database from %s", self.filename)
+                        logger.info("Loaded database from %s", filename)
 
                 except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as e:
-                    backup = f"{self.filename}.corrupt-{int(time.time())}"
-                    os.replace(self.filename, backup)
+                    backup = f"{filename}.corrupt-{int(time.time())}"
+                    os.replace(filename, backup)
                     logger.warning(
                         "Corrupt database file %s (%s); moved to %s and starting fresh",
-                        self.filename,
+                        filename,
                         e,
                         backup,
                     )
-                    self.db = _write_default(self.filename)
+                    self.db = _write_default(filename)
+                self.filename = filename
 
     async def flush(self) -> None:
         """Write the current data to the database file.
